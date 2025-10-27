@@ -3,10 +3,13 @@ export const config = {
   // Backend API URL - Update this to match your backend server
   API_BASE_URL: 'http://localhost:5000',
   
+  // Demo Mode - Set to true for demo without actual Razorpay integration
+  DEMO_MODE: true,
+  
   // Razorpay Configuration
   RAZORPAY: {
     // Replace with your actual Razorpay Key ID from your dashboard
-    KEY_ID: 'rzp_test_your_key_id_here', // Test key - replace with live key for production
+    KEY_ID: 'rzp_test_demo_key_id', // Demo key - replace with actual key for production
     
     // Theme configuration for Razorpay checkout
     THEME: {

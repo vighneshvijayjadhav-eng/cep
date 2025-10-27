@@ -2,10 +2,11 @@ import { useState } from 'react';
 import PaymentForm from './components/PaymentForm';
 import PaymentSuccess from './components/PaymentSuccess';
 import PaymentHistory from './components/PaymentHistory';
+import AdminDashboard from './components/AdminDashboard';
 import './App.css';
 
 function App() {
-  const [currentView, setCurrentView] = useState('form'); // 'form', 'success', 'history'
+  const [currentView, setCurrentView] = useState('form'); // 'form', 'success', 'history', 'admin'
   const [transactionDetails, setTransactionDetails] = useState(null);
 
   const handlePaymentSuccess = (details) => {
@@ -26,6 +27,10 @@ function App() {
     setCurrentView('form');
   };
 
+  const handleAdminDashboard = () => {
+    setCurrentView('admin');
+  };
+
   const renderCurrentView = () => {
     switch (currentView) {
       case 'success':
@@ -42,11 +47,18 @@ function App() {
             onBackToForm={handleBackToForm}
           />
         );
+      case 'admin':
+        return (
+          <AdminDashboard
+            onBack={handleBackToForm}
+          />
+        );
       case 'form':
       default:
         return (
           <PaymentForm
             onPaymentSuccess={handlePaymentSuccess}
+            onAdminDashboard={handleAdminDashboard}
           />
         );
     }
@@ -63,13 +75,19 @@ function App() {
               className={`nav-link ${currentView === 'form' ? 'active' : ''}`}
               onClick={handleNewPayment}
             >
-              New Payment
+              💳 New Payment
             </button>
             <button 
               className={`nav-link ${currentView === 'history' ? 'active' : ''}`}
               onClick={handleViewHistory}
             >
-              Payment History
+              📜 Payment History
+            </button>
+            <button 
+              className={`nav-link ${currentView === 'admin' ? 'active' : ''}`}
+              onClick={handleAdminDashboard}
+            >
+              ⚙️ Manage Flats
             </button>
           </div>
         </div>

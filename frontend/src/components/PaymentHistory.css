@@ -437,3 +437,40 @@
     gap: 10px;
   }
 }
+
+/* Demo Mode Banner */
+.demo-banner {
+  background: linear-gradient(45deg, #4CAF50, #45a049);
+  color: white;
+  padding: 15px;
+  border-radius: 10px;
+  margin-bottom: 20px;
+  border: 2px solid #4CAF50;
+}
+
+.demo-content {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 15px;
+}
+
+.demo-icon {
+  font-size: 24px;
+}
+
+.demo-text {
+  text-align: left;
+}
+
+.demo-text strong {
+  font-size: 16px;
+  display: block;
+  margin-bottom: 4px;
+}
+
+.demo-text p {
+  font-size: 14px;
+  margin: 0;
+  opacity: 0.9;
+}

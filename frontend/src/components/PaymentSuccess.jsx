@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { getPaymentReceipt } from '../services/paymentService';
+import { getPaymentReceiptDemo } from '../services/demoService';
+import config from '../config/config';
 import './PaymentSuccess.css';
 
 const PaymentSuccess = ({ transactionDetails, onNewPayment, onViewHistory }) => {
@@ -15,7 +17,12 @@ const PaymentSuccess = ({ transactionDetails, onNewPayment, onViewHistory }) => 
   const fetchReceipt = async (orderId) => {
     setLoading(true);
     try {
-      const receiptData = await getPaymentReceipt(orderId);
+      let receiptData;
+      if (config.DEMO_MODE) {
+        receiptData = await getPaymentReceiptDemo(orderId);
+      } else {
+        receiptData = await getPaymentReceipt(orderId);
+      }
       setReceipt(receiptData);
     } catch (error) {
       console.error('Failed to fetch receipt:', error);
@@ -65,6 +72,32 @@ const PaymentSuccess = ({ transactionDetails, onNewPayment, onViewHistory }) => 
   return (
     <div className="success-container">
       <div className="success-card">
+        {/* Demo Mode Banner */}
+        {transactionDetails?.isDemo && (
+          <div className="demo-banner">
+            <div className="demo-content">
+              <span className="demo-icon">🎯</span>
+              <div className="demo-text">
+                <strong>Demo Mode</strong>
+                <p>This is a simulation for client presentation</p>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Email Confirmation */}
+        {transactionDetails?.emailSent && (
+          <div className="email-confirmation">
+            <div className="email-content">
+              <span className="email-icon">📧</span>
+              <div className="email-text">
+                <strong>Receipt Sent!</strong>
+                <p>Payment receipt has been sent to your email</p>
+              </div>
+            </div>
+          </div>
+        )}
+        
         <div className="success-icon">
           <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <circle cx="12" cy="12" r="10"/>
