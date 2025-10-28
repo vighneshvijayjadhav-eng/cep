@@ -1,0 +1,416 @@
+.demo-razorpay-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  animation: fadeIn 0.3s ease-out;
+}
+
+.demo-razorpay-modal {
+  background: white;
+  border-radius: 12px;
+  width: 90%;
+  max-width: 480px;
+  max-height: 90vh;
+  overflow-y: auto;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  animation: slideUp 0.3s ease-out;
+}
+
+.demo-razorpay-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px;
+  border-bottom: 1px solid #f0f0f0;
+  background: #1976d2;
+  color: white;
+  border-radius: 12px 12px 0 0;
+}
+
+.demo-razorpay-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 600;
+  font-size: 18px;
+}
+
+.demo-razorpay-logo {
+  width: 32px;
+  height: 32px;
+  background: white;
+  color: #1976d2;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: bold;
+  font-size: 16px;
+}
+
+.demo-badge {
+  background: #ff9800;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.demo-close-btn {
+  background: none;
+  border: none;
+  color: white;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 4px;
+  transition: background 0.2s;
+}
+
+.demo-close-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Payment Details Step */
+.demo-payment-details {
+  padding: 30px;
+}
+
+.demo-merchant-info {
+  text-align: center;
+  margin-bottom: 30px;
+}
+
+.demo-merchant-info h3 {
+  color: #333;
+  margin: 0 0 8px 0;
+  font-size: 20px;
+}
+
+.demo-merchant-info p {
+  color: #666;
+  margin: 0;
+  font-size: 14px;
+}
+
+.demo-amount-display {
+  text-align: center;
+  margin-bottom: 30px;
+  padding: 20px;
+  background: #f8f9fa;
+  border-radius: 8px;
+}
+
+.demo-amount {
+  font-size: 32px;
+  font-weight: 700;
+  color: #1976d2;
+}
+
+.demo-customer-info {
+  margin-bottom: 30px;
+}
+
+.demo-customer-info h4 {
+  color: #333;
+  margin: 0 0 15px 0;
+  font-size: 16px;
+}
+
+.demo-info-item {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 0;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.demo-info-item:last-child {
+  border-bottom: none;
+}
+
+.demo-info-item span:first-child {
+  color: #666;
+  font-weight: 500;
+}
+
+.demo-info-item span:last-child {
+  color: #333;
+  font-weight: 600;
+}
+
+.demo-proceed-btn {
+  width: 100%;
+  background: #1976d2;
+  color: white;
+  border: none;
+  padding: 15px;
+  border-radius: 8px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.demo-proceed-btn:hover {
+  background: #1565c0;
+}
+
+/* Payment Methods Step */
+.demo-payment-methods {
+  padding: 0;
+}
+
+.demo-amount-header {
+  background: #f8f9fa;
+  padding: 20px;
+  text-align: center;
+  font-size: 18px;
+  font-weight: 600;
+  color: #333;
+  border-bottom: 1px solid #e0e0e0;
+}
+
+.demo-methods-list {
+  padding: 20px;
+}
+
+.demo-method {
+  display: flex;
+  align-items: center;
+  padding: 15px;
+  border: 2px solid #e0e0e0;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+}
+
+.demo-method:hover {
+  border-color: #1976d2;
+  background: #f3f7ff;
+}
+
+.demo-method.selected {
+  border-color: #1976d2;
+  background: #e3f2fd;
+}
+
+.demo-method-icon {
+  font-size: 24px;
+  margin-right: 15px;
+}
+
+.demo-method span {
+  flex: 1;
+  font-weight: 500;
+  color: #333;
+}
+
+.demo-method-check {
+  color: #1976d2;
+  font-weight: bold;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.demo-method.selected .demo-method-check {
+  opacity: 1;
+}
+
+.demo-payment-actions {
+  display: flex;
+  gap: 12px;
+  padding: 20px;
+  border-top: 1px solid #e0e0e0;
+}
+
+.demo-back-btn {
+  flex: 1;
+  background: #f5f5f5;
+  color: #666;
+  border: none;
+  padding: 12px;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.demo-back-btn:hover {
+  background: #e0e0e0;
+}
+
+.demo-pay-now-btn {
+  flex: 2;
+  background: #4caf50;
+  color: white;
+  border: none;
+  padding: 12px;
+  border-radius: 6px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.demo-pay-now-btn:hover {
+  background: #45a049;
+}
+
+/* Processing Step */
+.demo-processing {
+  padding: 40px 30px;
+  text-align: center;
+}
+
+.demo-processing-animation {
+  margin-bottom: 30px;
+}
+
+.demo-spinner {
+  width: 60px;
+  height: 60px;
+  border: 4px solid #f3f3f3;
+  border-top: 4px solid #1976d2;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+  margin: 0 auto;
+}
+
+.demo-processing h3 {
+  color: #333;
+  margin: 0 0 10px 0;
+  font-size: 20px;
+}
+
+.demo-processing p {
+  color: #666;
+  margin: 0 0 30px 0;
+}
+
+.demo-processing-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 15px;
+  align-items: flex-start;
+  max-width: 200px;
+  margin: 0 auto;
+}
+
+.demo-step {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+}
+
+.demo-step-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: bold;
+}
+
+.demo-step.completed .demo-step-icon {
+  background: #4caf50;
+  color: white;
+}
+
+.demo-step.active .demo-step-icon {
+  background: #ff9800;
+  color: white;
+}
+
+.demo-step.completed span:last-child {
+  color: #333;
+}
+
+.demo-step.active span:last-child {
+  color: #ff9800;
+  font-weight: 600;
+}
+
+/* Footer */
+.demo-razorpay-footer {
+  padding: 15px 20px;
+  background: #f8f9fa;
+  border-top: 1px solid #e0e0e0;
+  border-radius: 0 0 12px 12px;
+}
+
+.demo-security-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+  color: #666;
+}
+
+.demo-disclaimer {
+  background: #ff9800;
+  color: white;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-weight: 600;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translateY(50px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Mobile Responsiveness */
+@media (max-width: 480px) {
+  .demo-razorpay-modal {
+    width: 95%;
+    margin: 20px;
+  }
+  
+  .demo-payment-details {
+    padding: 20px;
+  }
+  
+  .demo-amount {
+    font-size: 28px;
+  }
+  
+  .demo-methods-list {
+    padding: 15px;
+  }
+  
+  .demo-method {
+    padding: 12px;
+  }
+  
+  .demo-processing {
+    padding: 30px 20px;
+  }
+}

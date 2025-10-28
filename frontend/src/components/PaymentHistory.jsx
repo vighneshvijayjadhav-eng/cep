@@ -1,5 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { getPaymentHistory, getPaymentReceipt } from '../services/paymentService';
+import { getPaymentHistoryDemo, getPaymentReceiptDemo } from '../services/demoService';
+import config from '../config/config';
 import './PaymentHistory.css';
 
 const PaymentHistory = ({ onBackToForm }) => {
@@ -26,19 +28,31 @@ const PaymentHistory = ({ onBackToForm }) => {
   const fetchPayments = async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({
-        page: pagination.page,
-        limit: pagination.limit,
-        ...Object.fromEntries(Object.entries(filters).filter(([_, v]) => v))
-      });
+      if (config.DEMO_MODE) {
+        // Use demo data
+        const response = await getPaymentHistoryDemo();
+        setPayments(response.transactions);
+        setPagination(prev => ({
+          ...prev,
+          total: response.pagination.total,
+          total_pages: response.pagination.total_pages
+        }));
+      } else {
+        // Use real API
+        const params = new URLSearchParams({
+          page: pagination.page,
+          limit: pagination.limit,
+          ...Object.fromEntries(Object.entries(filters).filter(([_, v]) => v))
+        });
 
-      const response = await getPaymentHistory(params.toString());
-      setPayments(response.transactions);
-      setPagination(prev => ({
-        ...prev,
-        total: response.pagination.total,
-        total_pages: response.pagination.total_pages
-      }));
+        const response = await getPaymentHistory(params.toString());
+        setPayments(response.transactions);
+        setPagination(prev => ({
+          ...prev,
+          total: response.pagination.total,
+          total_pages: response.pagination.total_pages
+        }));
+      }
     } catch (error) {
       console.error('Failed to fetch payment history:', error);
     } finally {
@@ -61,7 +75,12 @@ const PaymentHistory = ({ onBackToForm }) => {
 
   const viewReceipt = async (orderId) => {
     try {
-      const receipt = await getPaymentReceipt(orderId);
+      let receipt;
+      if (config.DEMO_MODE) {
+        receipt = await getPaymentReceiptDemo(orderId);
+      } else {
+        receipt = await getPaymentReceipt(orderId);
+      }
       setSelectedReceipt(receipt);
     } catch (error) {
       console.error('Failed to fetch receipt:', error);
@@ -97,6 +116,19 @@ const PaymentHistory = ({ onBackToForm }) => {
   return (
     <div className="history-container">
       <div className="history-card">
+        {/* Demo Mode Banner */}
+        {config.DEMO_MODE && (
+          <div className="demo-banner">
+            <div className="demo-content">
+              <span className="demo-icon">🎯</span>
+              <div className="demo-text">
+                <strong>Demo Mode</strong>
+                <p>Showing sample payment history for demonstration</p>
+              </div>
+            </div>
+          </div>
+        )}
+        
         <div className="history-header">
           <h2>Payment History</h2>
           <button onClick={onBackToForm} className="back-btn">
