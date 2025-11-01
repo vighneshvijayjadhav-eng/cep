@@ -1,109 +1,82 @@
-import { useState } from 'react';
-import PaymentForm from './components/PaymentForm';
-import PaymentSuccess from './components/PaymentSuccess';
-import PaymentHistory from './components/PaymentHistory';
-import AdminDashboard from './components/AdminDashboard';
+import { useEffect, useState } from 'react';
+import AdminDashboard from './components/AdminDashboard.jsx';
+import LoginView from './components/LoginView.jsx';
+import MemberDashboard from './components/MemberDashboard.jsx';
+import { adminLogin, memberLogin } from './services/authService.js';
 import './App.css';
 
-function App() {
-  const [currentView, setCurrentView] = useState('form'); // 'form', 'success', 'history', 'admin'
-  const [transactionDetails, setTransactionDetails] = useState(null);
+const STORAGE_KEY = 'society-portal-auth';
 
-  const handlePaymentSuccess = (details) => {
-    setTransactionDetails(details);
-    setCurrentView('success');
-  };
+const loadAuth = () => {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY);
+    return stored ? JSON.parse(stored) : null;
+  } catch (_error) {
+    return null;
+  }
+};
 
-  const handleNewPayment = () => {
-    setTransactionDetails(null);
-    setCurrentView('form');
-  };
+const App = () => {
+  const [auth, setAuth] = useState(() => loadAuth());
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState('');
 
-  const handleViewHistory = () => {
-    setCurrentView('history');
-  };
+  useEffect(() => {
+    if (auth) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(auth));
+    } else {
+      localStorage.removeItem(STORAGE_KEY);
+    }
+  }, [auth]);
 
-  const handleBackToForm = () => {
-    setCurrentView('form');
-  };
-
-  const handleAdminDashboard = () => {
-    setCurrentView('admin');
-  };
-
-  const renderCurrentView = () => {
-    switch (currentView) {
-      case 'success':
-        return (
-          <PaymentSuccess
-            transactionDetails={transactionDetails}
-            onNewPayment={handleNewPayment}
-            onViewHistory={handleViewHistory}
-          />
-        );
-      case 'history':
-        return (
-          <PaymentHistory
-            onBackToForm={handleBackToForm}
-          />
-        );
-      case 'admin':
-        return (
-          <AdminDashboard
-            onBack={handleBackToForm}
-          />
-        );
-      case 'form':
-      default:
-        return (
-          <PaymentForm
-            onPaymentSuccess={handlePaymentSuccess}
-            onAdminDashboard={handleAdminDashboard}
-          />
-        );
+  const handleMemberLogin = async (credentials) => {
+    setIsLoading(true);
+    setError('');
+    try {
+      const result = await memberLogin(credentials);
+      setAuth({ role: 'member', token: result.token, member: result.member });
+    } catch (err) {
+      setError(err.message || 'Unable to sign in');
+    } finally {
+      setIsLoading(false);
     }
   };
 
+  const handleAdminLogin = async (credentials) => {
+    setIsLoading(true);
+    setError('');
+    try {
+      const result = await adminLogin(credentials);
+      setAuth({ role: 'admin', token: result.token, admin: result.admin });
+    } catch (err) {
+      setError(err.message || 'Unable to sign in');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    setAuth(null);
+  };
+
   return (
-    <div className="app">
-      {/* Navigation Header */}
-      <nav className="app-nav">
-        <div className="nav-container">
-          <h1 className="nav-title">Society Maintenance Payment</h1>
-          <div className="nav-links">
-            <button 
-              className={`nav-link ${currentView === 'form' ? 'active' : ''}`}
-              onClick={handleNewPayment}
-            >
-              💳 New Payment
-            </button>
-            <button 
-              className={`nav-link ${currentView === 'history' ? 'active' : ''}`}
-              onClick={handleViewHistory}
-            >
-              📜 Payment History
-            </button>
-            <button 
-              className={`nav-link ${currentView === 'admin' ? 'active' : ''}`}
-              onClick={handleAdminDashboard}
-            >
-              ⚙️ Manage Flats
-            </button>
-          </div>
-        </div>
-      </nav>
-
-      {/* Main Content */}
-      <main className="app-main">
-        {renderCurrentView()}
-      </main>
-
-      {/* Footer */}
-      <footer className="app-footer">
-        <p>&copy; 2025 Society Maintenance Payment System. Powered by Razorpay.</p>
-      </footer>
+    <div className="app-shell">
+      <div className="app-content">
+        {!auth?.token ? (
+          <LoginView
+            onMemberLogin={handleMemberLogin}
+            onAdminLogin={handleAdminLogin}
+            isLoading={isLoading}
+            error={error}
+          />
+        ) : auth.role === 'member' ? (
+          <MemberDashboard member={auth.member} token={auth.token} onLogout={handleLogout} />
+        ) : (
+          <AdminDashboard admin={auth.admin} token={auth.token} onLogout={handleLogout} />
+        )}
+      </div>
     </div>
   );
-}
+};
 
 export default App;
