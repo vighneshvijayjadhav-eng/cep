@@ -5,533 +5,884 @@ import Razorpay from 'razorpay';
 import crypto from 'crypto';
 import dotenv from 'dotenv';
 import mongoose from 'mongoose';
+import bcrypt from 'bcryptjs';
+import jwt from 'jsonwebtoken';
+import multer from 'multer';
+import XLSX from 'xlsx';
+import PDFDocument from 'pdfkit';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 dotenv.config();
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const app = express();
 const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || 'change-me';
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
+const RAZORPAY_SECRET = process.env.RAZORPAY_KEY_SECRET || process.env.RAZORPAY_SECRET;
+
+if (!RAZORPAY_KEY_ID || !RAZORPAY_SECRET) {
+  console.warn('⚠️ Razorpay credentials are not fully configured. Payment routes will fail until they are set.');
+}
+
+const uploadsDir = path.join(__dirname, 'uploads');
+const profilesDir = path.join(uploadsDir, 'profiles');
+const invoicesDir = path.join(__dirname, 'invoices');
+
+const ensureDir = (dirPath) => {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true });
+  }
+};
+
+ensureDir(uploadsDir);
+ensureDir(profilesDir);
+ensureDir(invoicesDir);
 
 // Middleware
 app.use(cors());
 app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use('/uploads', express.static(uploadsDir));
+app.use('/invoices', express.static(invoicesDir));
 
-// MongoDB connection
-mongoose.connect(process.env.MONGO_URI || 'mongodb://localhost:27017/razorpay-gst', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-}).then(() => console.log('MongoDB connected'))
-  .catch(err => console.error('MongoDB connection error:', err));
+// MongoDB setup
+const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/society-portal';
+mongoose
+  .connect(mongoUri, { useNewUrlParser: true, useUnifiedTopology: true })
+  .then(() => console.log('✅ MongoDB connected'))
+  .catch((err) => console.error('MongoDB connection error:', err));
 
-// Razorpay instance
-const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID,
-  key_secret: process.env.RAZORPAY_SECRET
-});
-
-// MongoDB Schema for Society Maintenance Payments
-const transactionSchema = new mongoose.Schema({
-  order_id: { type: String, required: true, unique: true },
-  payment_id: String,
-  amount: Number, // This will be the maintenance charge amount
-  currency: String,
-  receipt: String,
-  
-  // Society maintenance specific fields
-  society_name: { type: String, required: true },
-  flat_number: { type: String, required: true },
-  wing: String,
-  floor: String,
-  
-  // Member details
-  member_name: { type: String, required: true },
-  member_phone: String,
-  member_email: String,
-  
-  // Maintenance details
-  maintenance_type: { 
-    type: String, 
-    enum: ['monthly', 'quarterly', 'annual'],
-    default: 'monthly',
-    required: true 
+const memberSchema = new mongoose.Schema(
+  {
+    societyName: { type: String, required: true },
+    flatNumber: { type: String, required: true, unique: true },
+    name: { type: String, required: true },
+    email: String,
+    phone: String,
+    tenantName: String,
+    tenantPhone: String,
+    profileImage: String,
+    maintenanceAmount: { type: Number, required: true },
+    passwordHash: { type: String, required: true },
+    isTenantPresent: { type: Boolean, default: false },
   },
-  payment_period: { type: String, required: true }, // e.g., "January 2025", "Q1 2025", "2025"
-  due_date: Date,
-  
-  // Payment details
-  status: { type: String, default: 'created', enum: ['created', 'paid', 'failed', 'refunded'] },
-  payment_method: String,
-  
-  // Timestamps
-  createdAt: { type: Date, default: Date.now },
-  paidAt: Date,
-  
-  // Additional notes
-  notes: String
-});
+  { timestamps: true }
+);
 
+const adminSchema = new mongoose.Schema(
+  {
+    name: { type: String, required: true },
+    email: { type: String, required: true, unique: true },
+    passwordHash: { type: String, required: true },
+  },
+  { timestamps: true }
+);
+
+const transactionSchema = new mongoose.Schema(
+  {
+    member: { type: mongoose.Schema.Types.ObjectId, ref: 'Member', required: true },
+    orderId: { type: String, required: true, unique: true },
+    paymentId: String,
+    amount: { type: Number, required: true },
+    currency: { type: String, default: 'INR' },
+    receipt: String,
+    status: { type: String, enum: ['created', 'paid', 'failed', 'refunded'], default: 'created' },
+    paymentMethod: String,
+    maintenanceType: { type: String, enum: ['monthly', 'quarterly', 'annual'], default: 'monthly' },
+    paymentPeriod: { type: String, required: true },
+    notes: String,
+    invoicePath: String,
+    invoiceGeneratedAt: Date,
+    paidAt: Date,
+  },
+  { timestamps: true }
+);
+
+const Member = mongoose.model('Member', memberSchema);
+const Admin = mongoose.model('Admin', adminSchema);
 const Transaction = mongoose.model('Transaction', transactionSchema);
 
-// Validation functions for society maintenance data
-const validateSocietyData = {
-  // Validate flat number format
-  flatNumber: (flatNumber) => {
-    if (typeof flatNumber !== 'string' || flatNumber.trim().length === 0) {
-      return { valid: false, message: 'Flat number must be a non-empty string' };
-    }
-    if (flatNumber.length > 10) {
-      return { valid: false, message: 'Flat number cannot exceed 10 characters' };
-    }
-    return { valid: true };
-  },
+// Razorpay client
+let razorpay = null;
+if (RAZORPAY_KEY_ID && RAZORPAY_SECRET) {
+  try {
+    razorpay = new Razorpay({ key_id: RAZORPAY_KEY_ID, key_secret: RAZORPAY_SECRET });
+  } catch (error) {
+    console.error('Failed to initialize Razorpay client:', error);
+  }
+}
 
-  // Validate society name
-  societyName: (societyName) => {
-    if (typeof societyName !== 'string' || societyName.trim().length === 0) {
-      return { valid: false, message: 'Society name must be a non-empty string' };
-    }
-    if (societyName.length > 100) {
-      return { valid: false, message: 'Society name cannot exceed 100 characters' };
-    }
-    return { valid: true };
-  },
+const SALT_ROUNDS = 10;
 
-  // Validate member details
-  memberName: (memberName) => {
-    if (typeof memberName !== 'string' || memberName.trim().length === 0) {
-      return { valid: false, message: 'Member name must be a non-empty string' };
-    }
-    if (memberName.length > 50) {
-      return { valid: false, message: 'Member name cannot exceed 50 characters' };
-    }
-    return { valid: true };
-  },
-
-  // Validate phone number
-  phoneNumber: (phone) => {
-    if (!phone) return { valid: true }; // Optional field
-    const phoneRegex = /^[6-9]\d{9}$/;
-    if (!phoneRegex.test(phone)) {
-      return { valid: false, message: 'Phone number must be a valid 10-digit Indian mobile number' };
-    }
-    return { valid: true };
-  },
-
-  // Validate email
-  email: (email) => {
-    if (!email) return { valid: true }; // Optional field
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return { valid: false, message: 'Invalid email format' };
-    }
-    return { valid: true };
-  },
-
-  // Validate payment period format
-  paymentPeriod: (paymentPeriod, maintenanceType) => {
-    if (typeof paymentPeriod !== 'string' || paymentPeriod.trim().length === 0) {
-      return { valid: false, message: 'Payment period must be a non-empty string' };
+const seedDemoData = async () => {
+  try {
+    const shouldSeed = process.env.SEED_DEMO_DATA !== 'false';
+    if (!shouldSeed) {
+      return;
     }
 
-    // Validate format based on maintenance type
-    switch (maintenanceType) {
-      case 'monthly':
-        const monthlyRegex = /^(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}$/;
-        if (!monthlyRegex.test(paymentPeriod)) {
-          return { valid: false, message: 'Monthly payment period must be in format "Month YYYY" (e.g., "January 2025")' };
-        }
-        break;
-      case 'quarterly':
-        const quarterlyRegex = /^Q[1-4]\s+\d{4}$/;
-        if (!quarterlyRegex.test(paymentPeriod)) {
-          return { valid: false, message: 'Quarterly payment period must be in format "Q1-Q4 YYYY" (e.g., "Q1 2025")' };
-        }
-        break;
-      case 'annual':
-        const annualRegex = /^\d{4}$/;
-        if (!annualRegex.test(paymentPeriod)) {
-          return { valid: false, message: 'Annual payment period must be in format "YYYY" (e.g., "2025")' };
-        }
-        break;
-    }
-    return { valid: true };
-  },
+    const adminEmail = process.env.DEMO_ADMIN_EMAIL || 'admin@example.com';
+    const adminPassword = process.env.DEMO_ADMIN_PASSWORD || 'Admin@123';
 
-  // Validate maintenance amount
-  amount: (amount) => {
-    if (typeof amount !== 'number' || amount <= 0) {
-      return { valid: false, message: 'Amount must be a positive number' };
+    const existingAdmin = await Admin.findOne({ email: adminEmail });
+    if (!existingAdmin) {
+      const passwordHash = await bcrypt.hash(adminPassword, SALT_ROUNDS);
+      await Admin.create({ name: 'Portal Admin', email: adminEmail, passwordHash });
+      console.log(`👤 Demo admin ready -> email: ${adminEmail} | password: ${adminPassword}`);
     }
-    if (amount > 999999) {
-      return { valid: false, message: 'Amount cannot exceed 999999' };
-    }
-    return { valid: true };
-  },
 
-  // Validate due date
-  dueDate: (dueDate) => {
-    if (!dueDate) return { valid: true }; // Optional field
-    const date = new Date(dueDate);
-    if (isNaN(date.getTime())) {
-      return { valid: false, message: 'Invalid due date format' };
+    const memberFlat = process.env.DEMO_MEMBER_FLAT || 'A-101';
+    const memberPassword = process.env.DEMO_MEMBER_PASSWORD || 'Member@123';
+
+    const existingMember = await Member.findOne({ flatNumber: memberFlat });
+    if (!existingMember) {
+      const passwordHash = await bcrypt.hash(memberPassword, SALT_ROUNDS);
+      await Member.create({
+        societyName: process.env.DEMO_MEMBER_SOCIETY || 'Demo Heights Residency',
+        flatNumber: memberFlat,
+        name: process.env.DEMO_MEMBER_NAME || 'John Demo',
+        email: process.env.DEMO_MEMBER_EMAIL || 'member@example.com',
+        phone: process.env.DEMO_MEMBER_PHONE || '9876543210',
+        maintenanceAmount: Number(process.env.DEMO_MEMBER_MAINTENANCE || 3500),
+        passwordHash,
+      });
+      console.log(`🏠 Demo member ready -> flat: ${memberFlat} | password: ${memberPassword}`);
     }
-    const oneYearFromNow = new Date();
-    oneYearFromNow.setFullYear(oneYearFromNow.getFullYear() + 1);
-    if (date > oneYearFromNow) {
-      return { valid: false, message: 'Due date cannot be more than one year in the future' };
-    }
-    return { valid: true };
+  } catch (error) {
+    console.error('Demo data seeding failed:', error);
   }
 };
 
-// Helper function to validate complete maintenance payment data
-const validateMaintenancePaymentData = (data) => {
-  const errors = [];
-  
-  // Required field validations
-  const flatValidation = validateSocietyData.flatNumber(data.flat_number);
-  if (!flatValidation.valid) errors.push(flatValidation.message);
-  
-  const societyValidation = validateSocietyData.societyName(data.society_name);
-  if (!societyValidation.valid) errors.push(societyValidation.message);
-  
-  const memberValidation = validateSocietyData.memberName(data.member_name);
-  if (!memberValidation.valid) errors.push(memberValidation.message);
-  
-  const periodValidation = validateSocietyData.paymentPeriod(data.payment_period, data.maintenance_type);
-  if (!periodValidation.valid) errors.push(periodValidation.message);
-  
-  const amountValidation = validateSocietyData.amount(data.amount);
-  if (!amountValidation.valid) errors.push(amountValidation.message);
-  
-  // Optional field validations
-  const phoneValidation = validateSocietyData.phoneNumber(data.member_phone);
-  if (!phoneValidation.valid) errors.push(phoneValidation.message);
-  
-  const emailValidation = validateSocietyData.email(data.member_email);
-  if (!emailValidation.valid) errors.push(emailValidation.message);
-  
-  const dueDateValidation = validateSocietyData.dueDate(data.due_date);
-  if (!dueDateValidation.valid) errors.push(dueDateValidation.message);
-  
+seedDemoData();
+
+const createToken = (payload) => jwt.sign(payload, JWT_SECRET, { expiresIn: '7d' });
+
+const sanitizeMember = (memberDoc) => {
+  if (!memberDoc) return null;
   return {
-    valid: errors.length === 0,
-    errors
+    id: memberDoc._id,
+    societyName: memberDoc.societyName,
+    flatNumber: memberDoc.flatNumber,
+    name: memberDoc.name,
+    email: memberDoc.email,
+    phone: memberDoc.phone,
+    tenantName: memberDoc.tenantName,
+    tenantPhone: memberDoc.tenantPhone,
+    profileImage: memberDoc.profileImage,
+    maintenanceAmount: memberDoc.maintenanceAmount,
+    isTenantPresent: memberDoc.isTenantPresent,
+    createdAt: memberDoc.createdAt,
+    updatedAt: memberDoc.updatedAt,
   };
 };
 
-// Routes
-// Society Maintenance Payment Order Creation (Simplified)
-app.post('/create-maintenance-order', async (req, res) => {
+const sanitizeAdmin = (adminDoc) => {
+  if (!adminDoc) return null;
+  return {
+    id: adminDoc._id,
+    name: adminDoc.name,
+    email: adminDoc.email,
+    createdAt: adminDoc.createdAt,
+    updatedAt: adminDoc.updatedAt,
+  };
+};
+
+const authMiddleware = (...roles) => {
+  return async (req, res, next) => {
+    try {
+      const header = req.headers.authorization;
+      if (!header || !header.startsWith('Bearer ')) {
+        return res.status(401).json({ error: 'Authorization header missing' });
+      }
+
+      const token = header.substring(7);
+      const payload = jwt.verify(token, JWT_SECRET);
+
+      if (roles.length && !roles.includes(payload.role)) {
+        return res.status(403).json({ error: 'Forbidden' });
+      }
+
+      if (payload.role === 'member') {
+        const member = await Member.findById(payload.id);
+        if (!member) {
+          return res.status(401).json({ error: 'Member not found' });
+        }
+        req.member = member;
+      }
+
+      if (payload.role === 'admin') {
+        const admin = await Admin.findById(payload.id);
+        if (!admin) {
+          return res.status(401).json({ error: 'Admin not found' });
+        }
+        req.admin = admin;
+      }
+
+      next();
+    } catch (error) {
+      console.error('Auth error:', error);
+      res.status(401).json({ error: 'Invalid or expired token' });
+    }
+  };
+};
+
+const profileUpload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      ensureDir(profilesDir);
+      cb(null, profilesDir);
+    },
+    filename: (_req, file, cb) => {
+      const ext = path.extname(file.originalname) || '.jpg';
+      cb(null, `profile-${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`);
+    },
+  }),
+  limits: { fileSize: 2 * 1024 * 1024 },
+});
+
+const importUpload = multer({ storage: multer.memoryStorage() });
+
+const generateInvoicePdf = (transaction, member) => {
+  return new Promise((resolve, reject) => {
+    try {
+      const doc = new PDFDocument({ margin: 50 });
+      const fileName = `${transaction.orderId}.pdf`;
+      const filePath = path.join(invoicesDir, fileName);
+      const writeStream = fs.createWriteStream(filePath);
+      doc.pipe(writeStream);
+
+      doc
+        .fontSize(20)
+        .text('Society Maintenance Invoice', { align: 'center' })
+        .moveDown();
+
+      doc
+        .fontSize(12)
+        .text(`Invoice Date: ${new Date().toLocaleDateString()}`)
+        .text(`Receipt #: ${transaction.receipt}`)
+        .text(`Order ID: ${transaction.orderId}`)
+        .moveDown();
+
+      doc.fontSize(14).text('Member Details', { underline: true }).moveDown(0.5);
+      doc
+        .fontSize(12)
+        .text(`Society: ${member.societyName}`)
+        .text(`Flat Number: ${member.flatNumber}`)
+        .text(`Name: ${member.name}`)
+        .text(`Email: ${member.email || '-'}`)
+        .text(`Phone: ${member.phone || '-'}`)
+        .moveDown();
+
+      doc.fontSize(14).text('Payment Details', { underline: true }).moveDown(0.5);
+      doc
+        .fontSize(12)
+        .text(`Payment Period: ${transaction.paymentPeriod}`)
+        .text(`Maintenance Type: ${transaction.maintenanceType}`)
+        .text(`Amount Paid: ₹${transaction.amount.toFixed(2)}`)
+        .text(`Status: ${transaction.status}`)
+        .text(`Paid At: ${transaction.paidAt ? new Date(transaction.paidAt).toLocaleString() : '-'}`)
+        .moveDown();
+
+      doc
+        .fontSize(12)
+        .text('Thank you for keeping your maintenance dues up to date.', { align: 'center' })
+        .moveDown();
+
+      doc.end();
+
+      writeStream.on('finish', () => resolve({ filePath, publicUrl: `/invoices/${fileName}` }));
+      writeStream.on('error', reject);
+    } catch (error) {
+      reject(error);
+    }
+  });
+};
+
+// Auth Routes
+app.post('/auth/member/login', async (req, res) => {
   try {
-    const {
-      amount,
-      currency = 'INR',
-      society_name,
-      flat_number,
-      wing,
-      floor,
-      member_name,
-      member_phone,
-      member_email,
-      maintenance_type = 'monthly',
-      payment_period,
-      due_date,
-      notes
-    } = req.body;
+    const { flatNumber, password } = req.body;
+    const member = await Member.findOne({ flatNumber });
+    if (!member) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
 
-    // Validation for required fields
-    if (!amount || !society_name || !flat_number || !member_name || !payment_period) {
-      return res.status(400).json({ 
-        error: 'Missing required fields: amount, society_name, flat_number, member_name, payment_period' 
+    const isValid = await bcrypt.compare(password, member.passwordHash);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const token = createToken({ id: member._id, role: 'member' });
+    res.json({ token, member: sanitizeMember(member) });
+  } catch (error) {
+    console.error('Member login error:', error);
+    res.status(500).json({ error: 'Failed to login' });
+  }
+});
+
+app.post('/auth/admin/login', async (req, res) => {
+  try {
+    const { email, password } = req.body;
+    const admin = await Admin.findOne({ email });
+    if (!admin) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const isValid = await bcrypt.compare(password, admin.passwordHash);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    const token = createToken({ id: admin._id, role: 'admin' });
+    res.json({ token, admin: sanitizeAdmin(admin) });
+  } catch (error) {
+    console.error('Admin login error:', error);
+    res.status(500).json({ error: 'Failed to login' });
+  }
+});
+
+app.post('/auth/admin/register', async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Name, email, and password are required' });
+    }
+
+    const adminCount = await Admin.countDocuments();
+    if (adminCount > 0) {
+      try {
+        const header = req.headers.authorization;
+        if (!header || !header.startsWith('Bearer ')) {
+          return res.status(403).json({ error: 'Admin token required' });
+        }
+
+        const authToken = header.substring(7);
+        const payload = jwt.verify(authToken, JWT_SECRET);
+        if (payload.role !== 'admin') {
+          return res.status(403).json({ error: 'Admin token required' });
+        }
+
+        const admin = await Admin.findById(payload.id);
+        if (!admin) {
+          return res.status(403).json({ error: 'Admin token invalid' });
+        }
+      } catch (authError) {
+        console.error('Admin register auth error:', authError);
+        return res.status(403).json({ error: 'Admin token required' });
+      }
+    }
+
+    const existing = await Admin.findOne({ email });
+    if (existing) {
+      return res.status(409).json({ error: 'Admin with this email already exists' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+    const admin = await Admin.create({ name, email, passwordHash });
+    res.status(201).json({ admin: sanitizeAdmin(admin) });
+  } catch (error) {
+    console.error('Admin register error:', error);
+    res.status(500).json({ error: 'Failed to register admin' });
+  }
+});
+
+// Member profile routes
+app.get('/member/profile', authMiddleware('member'), (req, res) => {
+  res.json({ member: sanitizeMember(req.member) });
+});
+
+app.put('/member/profile', authMiddleware('member'), profileUpload.single('profileImage'), async (req, res) => {
+  try {
+    const updatableFields = ['name', 'email', 'phone', 'tenantName', 'tenantPhone', 'isTenantPresent'];
+    for (const field of updatableFields) {
+      if (field in req.body) {
+        if (field === 'isTenantPresent') {
+          req.member[field] = req.body[field] === true || req.body[field] === 'true';
+        } else {
+          req.member[field] = req.body[field];
+        }
+      }
+    }
+
+    if (req.file) {
+      req.member.profileImage = `/uploads/profiles/${req.file.filename}`;
+    }
+
+    await req.member.save();
+    res.json({ member: sanitizeMember(req.member) });
+  } catch (error) {
+    console.error('Update profile error:', error);
+    res.status(500).json({ error: 'Failed to update profile' });
+  }
+});
+
+app.get('/member/maintenance', authMiddleware('member'), (req, res) => {
+  res.json({ amount: req.member.maintenanceAmount });
+});
+
+// Payment routes (Member)
+app.post('/member/payments/create-order', authMiddleware('member'), async (req, res) => {
+  try {
+    const { paymentPeriod, maintenanceType = 'monthly', amount, notes } = req.body;
+
+    if (!paymentPeriod) {
+      return res.status(400).json({ error: 'Payment period is required' });
+    }
+
+    const paymentAmount = Number(amount || req.member.maintenanceAmount);
+    if (!paymentAmount || paymentAmount <= 0) {
+      return res.status(400).json({ error: 'Invalid payment amount' });
+    }
+
+    const receipt = `${req.member.societyName.replace(/\s+/g, '-').toUpperCase()}_${req.member.flatNumber}_${Date.now()}`;
+
+    if (!razorpay) {
+      const manualOrderId = `manual_${Date.now()}`;
+      const manualPaymentId = `manual_pay_${Date.now()}`;
+
+      const transaction = await Transaction.create({
+        member: req.member._id,
+        orderId: manualOrderId,
+        paymentId: manualPaymentId,
+        amount: paymentAmount,
+        currency: 'INR',
+        receipt,
+        maintenanceType,
+        paymentPeriod,
+        notes,
+        status: 'paid',
+        paymentMethod: 'manual',
+        paidAt: new Date(),
+      });
+
+      const populatedTransaction = await Transaction.findById(transaction._id).populate('member');
+      const invoiceInfo = await generateInvoicePdf(populatedTransaction, populatedTransaction.member);
+      populatedTransaction.invoicePath = invoiceInfo.filePath;
+      populatedTransaction.invoiceGeneratedAt = new Date();
+      await populatedTransaction.save();
+
+      return res.json({
+        manual: true,
+        order: {
+          id: manualOrderId,
+          amount: Math.round(paymentAmount * 100),
+          currency: 'INR',
+          status: 'paid',
+        },
+        transaction: {
+          orderId: populatedTransaction.orderId,
+          paymentId: populatedTransaction.paymentId,
+          amount: populatedTransaction.amount,
+          paymentPeriod: populatedTransaction.paymentPeriod,
+          maintenanceType: populatedTransaction.maintenanceType,
+          status: populatedTransaction.status,
+          paidAt: populatedTransaction.paidAt,
+          invoiceUrl: invoiceInfo.publicUrl,
+        },
+        member: sanitizeMember(req.member),
       });
     }
 
-    // Validate maintenance_type
-    const validMaintenanceTypes = ['monthly', 'quarterly', 'annual'];
-    if (!validMaintenanceTypes.includes(maintenance_type)) {
-      return res.status(400).json({ 
-        error: 'Invalid maintenance_type. Must be one of: ' + validMaintenanceTypes.join(', ') 
-      });
-    }
-
-    // Comprehensive validation using validation functions
-    const validationResult = validateMaintenancePaymentData(req.body);
-    if (!validationResult.valid) {
-      return res.status(400).json({ 
-        error: 'Validation failed',
-        details: validationResult.errors
-      });
-    }
-
-    // Generate receipt ID
-    const receipt = `${society_name.replace(/\s+/g, '_').toUpperCase()}_${flat_number}_${Date.now()}`;
-
-    const options = {
-      amount: amount * 100, // Convert to paise
-      currency,
+    const order = await razorpay.orders.create({
+      amount: Math.round(paymentAmount * 100),
+      currency: 'INR',
       receipt,
       notes: {
-        society_name,
-        flat_number,
-        member_name,
-        maintenance_type,
-        payment_period
-      }
-    };
+        memberId: String(req.member._id),
+        flatNumber: req.member.flatNumber,
+        paymentPeriod,
+      },
+    });
 
-    const order = await razorpay.orders.create(options);
-
-    // Save to MongoDB
-    const transaction = new Transaction({
-      order_id: order.id,
-      amount, // This is the maintenance charge amount
-      currency,
+    await Transaction.create({
+      member: req.member._id,
+      orderId: order.id,
+      amount: paymentAmount,
+      currency: order.currency,
       receipt,
-      society_name,
-      flat_number,
-      wing,
-      floor,
-      member_name,
-      member_phone,
-      member_email,
-      maintenance_type,
-      payment_period,
-      due_date: due_date ? new Date(due_date) : null,
-      notes
+      maintenanceType,
+      paymentPeriod,
+      notes,
     });
-
-    await transaction.save();
 
     res.json({
-      ...order,
-      bill_details: {
-        society_name,
-        flat_number,
-        member_name,
-        maintenance_type,
-        payment_period,
-        maintenance_amount: amount,
-        receipt_id: receipt,
-        due_date: due_date || null
-      }
+      order,
+      member: sanitizeMember(req.member),
     });
   } catch (error) {
-    console.error('Error creating maintenance order:', error);
-    res.status(500).json({ error: 'Failed to create maintenance order' });
+    console.error('Create order error:', error);
+    res.status(500).json({ error: 'Failed to create order' });
   }
 });
 
-
-
-app.post('/verify-payment', async (req, res) => {
+app.post('/member/payments/verify', async (req, res) => {
   try {
-    const { order_id, payment_id, signature } = req.body;
-
-    if (!order_id || !payment_id || !signature) {
-      return res.status(400).json({ error: 'Missing required fields' });
+    const { orderId, paymentId, signature } = req.body;
+    if (!orderId) {
+      return res.status(400).json({ error: 'orderId is required' });
     }
 
-    const body = order_id + '|' + payment_id;
-    const expectedSignature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_SECRET)
-      .update(body)
-      .digest('hex');
-
-    const isValid = expectedSignature === signature;
-
-    if (isValid) {
-      // Update transaction status in MongoDB with additional details
-      const updateResult = await Transaction.updateOne(
-        { order_id },
-        { 
-          payment_id, 
-          status: 'paid',
-          paidAt: new Date(),
-          payment_method: 'razorpay'
-        }
-      );
-
-      if (updateResult.matchedCount === 0) {
-        return res.status(404).json({ error: 'Transaction not found' });
+    const existingTransaction = await Transaction.findOne({ orderId }).populate('member');
+    if (existingTransaction && existingTransaction.paymentMethod === 'manual') {
+      if (!existingTransaction.invoicePath || !existingTransaction.invoiceGeneratedAt) {
+        const invoiceInfo = await generateInvoicePdf(existingTransaction, existingTransaction.member);
+        existingTransaction.invoicePath = invoiceInfo.filePath;
+        existingTransaction.invoiceGeneratedAt = new Date();
+        await existingTransaction.save();
       }
 
-      // Fetch the updated transaction to return maintenance details
-      const transaction = await Transaction.findOne({ order_id });
-      
-      res.json({ 
-        verified: isValid,
-        transaction_details: {
-          society_name: transaction.society_name,
-          flat_number: transaction.flat_number,
-          member_name: transaction.member_name,
-          maintenance_type: transaction.maintenance_type,
-          payment_period: transaction.payment_period,
-          amount: transaction.amount,
-          paid_at: transaction.paidAt,
-          receipt_id: transaction.receipt
-        }
+      return res.json({
+        verified: true,
+        invoiceUrl: existingTransaction.invoicePath ? `/invoices/${path.basename(existingTransaction.invoicePath)}` : null,
+        transaction: {
+          orderId: existingTransaction.orderId,
+          paymentId: existingTransaction.paymentId,
+          amount: existingTransaction.amount,
+          paymentPeriod: existingTransaction.paymentPeriod,
+          maintenanceType: existingTransaction.maintenanceType,
+          paidAt: existingTransaction.paidAt,
+          status: existingTransaction.status,
+        },
       });
-    } else {
-      res.json({ verified: isValid });
     }
-  } catch (error) {
-    console.error('Error verifying payment:', error);
-    res.status(500).json({ error: 'Failed to verify payment' });
-  }
-});
 
-// Get payment history for a specific flat or society
-app.get('/payment-history', async (req, res) => {
-  try {
-    const { society_name, flat_number, member_phone, status, maintenance_type, limit = 10, page = 1 } = req.query;
+    if (!paymentId || !signature) {
+      return res.status(400).json({ error: 'orderId, paymentId, and signature are required' });
+    }
 
-    // Build filter query
-    const filter = {};
-    if (society_name) filter.society_name = new RegExp(society_name, 'i');
-    if (flat_number) filter.flat_number = flat_number;
-    if (member_phone) filter.member_phone = member_phone;
-    if (status) filter.status = status;
-    if (maintenance_type) filter.maintenance_type = maintenance_type;
+    if (!RAZORPAY_SECRET) {
+      return res.status(500).json({ error: 'Razorpay secret not configured' });
+    }
 
-    const skip = (page - 1) * limit;
+    const body = `${orderId}|${paymentId}`;
+    const expectedSignature = crypto.createHmac('sha256', RAZORPAY_SECRET).update(body).digest('hex');
 
-    const transactions = await Transaction.find(filter)
-      .sort({ createdAt: -1 })
-      .limit(parseInt(limit))
-      .skip(skip);
+    if (expectedSignature !== signature) {
+      return res.status(400).json({ error: 'Invalid payment signature' });
+    }
 
-    const total = await Transaction.countDocuments(filter);
-
-    res.json({
-      transactions,
-      pagination: {
-        total,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total_pages: Math.ceil(total / limit)
-      }
-    });
-  } catch (error) {
-    console.error('Error fetching payment history:', error);
-    res.status(500).json({ error: 'Failed to fetch payment history' });
-  }
-});
-
-// Get payment receipt details
-app.get('/payment-receipt/:order_id', async (req, res) => {
-  try {
-    const { order_id } = req.params;
-
-    const transaction = await Transaction.findOne({ order_id });
+    const transaction = await Transaction.findOneAndUpdate(
+      { orderId },
+      {
+        paymentId,
+        status: 'paid',
+        paymentMethod: 'razorpay',
+        paidAt: new Date(),
+      },
+      { new: true }
+    ).populate('member');
 
     if (!transaction) {
       return res.status(404).json({ error: 'Transaction not found' });
     }
 
-    const receipt = {
-      receipt_id: transaction.receipt,
-      order_id: transaction.order_id,
-      payment_id: transaction.payment_id,
-      society_details: {
-        society_name: transaction.society_name,
-        flat_number: transaction.flat_number,
-        wing: transaction.wing,
-        floor: transaction.floor
-      },
-      member_details: {
-        name: transaction.member_name,
-        phone: transaction.member_phone,
-        email: transaction.member_email
-      },
-      payment_details: {
-        maintenance_type: transaction.maintenance_type,
-        payment_period: transaction.payment_period,
-        due_date: transaction.due_date,
-        paid_at: transaction.paidAt,
-        status: transaction.status,
-        payment_method: transaction.payment_method
-      },
-      maintenance_bill: {
-        maintenance_amount: transaction.amount,
-        description: `${transaction.maintenance_type} maintenance for ${transaction.payment_period}`
-      },
-      notes: transaction.notes,
-      created_at: transaction.createdAt
-    };
+    const invoiceInfo = await generateInvoicePdf(transaction, transaction.member);
+    transaction.invoicePath = invoiceInfo.filePath;
+    transaction.invoiceGeneratedAt = new Date();
+    await transaction.save();
 
-    res.json(receipt);
+    res.json({
+      verified: true,
+      invoiceUrl: invoiceInfo.publicUrl,
+      transaction: {
+        orderId: transaction.orderId,
+        paymentId: transaction.paymentId,
+        amount: transaction.amount,
+        paymentPeriod: transaction.paymentPeriod,
+        maintenanceType: transaction.maintenanceType,
+        paidAt: transaction.paidAt,
+        status: transaction.status,
+      },
+    });
   } catch (error) {
-    console.error('Error fetching receipt:', error);
-    res.status(500).json({ error: 'Failed to fetch receipt' });
+    console.error('Verify payment error:', error);
+    res.status(500).json({ error: 'Failed to verify payment' });
   }
 });
 
-// Get pending payments for a society or flat
-app.get('/pending-payments', async (req, res) => {
+app.get('/member/payments', authMiddleware('member'), async (req, res) => {
   try {
-    const { society_name, flat_number, due_before } = req.query;
+    const transactions = await Transaction.find({ member: req.member._id }).sort({ createdAt: -1 });
+    res.json({
+      payments: transactions.map((txn) => ({
+        orderId: txn.orderId,
+        paymentId: txn.paymentId,
+        amount: txn.amount,
+        status: txn.status,
+        maintenanceType: txn.maintenanceType,
+        paymentPeriod: txn.paymentPeriod,
+        paidAt: txn.paidAt,
+        invoiceUrl: txn.invoicePath ? `/invoices/${path.basename(txn.invoicePath)}` : null,
+        createdAt: txn.createdAt,
+      })),
+    });
+  } catch (error) {
+    console.error('Fetch member payments error:', error);
+    res.status(500).json({ error: 'Failed to fetch payments' });
+  }
+});
 
-    if (!society_name) {
-      return res.status(400).json({ error: 'society_name is required' });
+app.get('/member/payments/:orderId/invoice', authMiddleware('member'), async (req, res) => {
+  try {
+    const transaction = await Transaction.findOne({ orderId: req.params.orderId, member: req.member._id });
+    if (!transaction || !transaction.invoicePath) {
+      return res.status(404).json({ error: 'Invoice not found' });
     }
 
-    const filter = {
-      society_name: new RegExp(society_name, 'i'),
-      status: 'created'
-    };
-
-    if (flat_number) filter.flat_number = flat_number;
-    if (due_before) filter.due_date = { $lt: new Date(due_before) };
-
-    const pendingPayments = await Transaction.find(filter)
-      .sort({ due_date: 1, createdAt: -1 });
-
-    res.json({
-      pending_payments: pendingPayments,
-      count: pendingPayments.length
-    });
+    res.download(transaction.invoicePath);
   } catch (error) {
-    console.error('Error fetching pending payments:', error);
-    res.status(500).json({ error: 'Failed to fetch pending payments' });
+    console.error('Download invoice error:', error);
+    res.status(500).json({ error: 'Failed to download invoice' });
   }
 });
 
-// Get society payment summary
-app.get('/society-summary/:society_name', async (req, res) => {
+// Admin member management
+app.get('/admin/members', authMiddleware('admin'), async (req, res) => {
   try {
-    const { society_name } = req.params;
+    const { search } = req.query;
+    const filter = {};
+    if (search) {
+      filter.$or = [
+        { flatNumber: new RegExp(search, 'i') },
+        { name: new RegExp(search, 'i') },
+        { email: new RegExp(search, 'i') },
+        { phone: new RegExp(search, 'i') },
+      ];
+    }
 
-    const summary = await Transaction.aggregate([
-      {
-        $match: {
-          society_name: new RegExp(society_name, 'i')
-        }
-      },
-      {
-        $group: {
-          _id: '$status',
-          count: { $sum: 1 },
-          total_amount: { $sum: '$amount' }
+    const members = await Member.find(filter).sort({ createdAt: -1 });
+    res.json({ members: members.map(sanitizeMember) });
+  } catch (error) {
+    console.error('List members error:', error);
+    res.status(500).json({ error: 'Failed to list members' });
+  }
+});
+
+app.post('/admin/members', authMiddleware('admin'), async (req, res) => {
+  try {
+    const {
+      societyName,
+      flatNumber,
+      name,
+      email,
+      phone,
+      tenantName,
+      tenantPhone,
+      maintenanceAmount,
+      password,
+    } = req.body;
+
+    if (!societyName || !flatNumber || !name || !maintenanceAmount || !password) {
+      return res.status(400).json({ error: 'societyName, flatNumber, name, maintenanceAmount, password are required' });
+    }
+
+    const parsedAmount = Number(maintenanceAmount);
+    if (!parsedAmount || parsedAmount <= 0) {
+      return res.status(400).json({ error: 'maintenanceAmount must be a positive number' });
+    }
+
+    const existing = await Member.findOne({ flatNumber });
+    if (existing) {
+      return res.status(409).json({ error: 'Member with this flat number already exists' });
+    }
+
+    const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+
+    const member = await Member.create({
+      societyName,
+      flatNumber,
+      name,
+      email,
+      phone,
+      tenantName,
+      tenantPhone,
+      maintenanceAmount: parsedAmount,
+      passwordHash,
+      isTenantPresent: Boolean(tenantName),
+    });
+
+    res.status(201).json({ member: sanitizeMember(member) });
+  } catch (error) {
+    console.error('Create member error:', error);
+    res.status(500).json({ error: 'Failed to create member' });
+  }
+});
+
+app.put('/admin/members/:id', authMiddleware('admin'), async (req, res) => {
+  try {
+    const member = await Member.findById(req.params.id);
+    if (!member) {
+      return res.status(404).json({ error: 'Member not found' });
+    }
+
+    const fields = ['societyName', 'flatNumber', 'name', 'email', 'phone', 'tenantName', 'tenantPhone', 'maintenanceAmount', 'isTenantPresent'];
+    for (const field of fields) {
+      if (field in req.body) {
+        if (field === 'maintenanceAmount') {
+          const amt = Number(req.body[field]);
+          if (!amt || amt <= 0) {
+            return res.status(400).json({ error: 'maintenanceAmount must be a positive number' });
+          }
+          member[field] = amt;
+        } else if (field === 'isTenantPresent') {
+          member[field] = req.body[field] === true || req.body[field] === 'true';
+        } else {
+          member[field] = req.body[field];
         }
       }
-    ]);
+    }
 
-    const totalFlats = await Transaction.distinct('flat_number', {
-      society_name: new RegExp(society_name, 'i')
-    });
+    if (req.body.password) {
+      member.passwordHash = await bcrypt.hash(req.body.password, SALT_ROUNDS);
+    }
+
+    await member.save();
+    res.json({ member: sanitizeMember(member) });
+  } catch (error) {
+    console.error('Update member error:', error);
+    res.status(500).json({ error: 'Failed to update member' });
+  }
+});
+
+app.delete('/admin/members/:id', authMiddleware('admin'), async (req, res) => {
+  try {
+    const member = await Member.findById(req.params.id);
+    if (!member) {
+      return res.status(404).json({ error: 'Member not found' });
+    }
+
+    await Transaction.deleteMany({ member: member._id });
+    await Member.deleteOne({ _id: member._id });
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete member error:', error);
+    res.status(500).json({ error: 'Failed to delete member' });
+  }
+});
+
+app.post('/admin/members/import', authMiddleware('admin'), importUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'Import file is required' });
+    }
+
+    const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+    const sheet = workbook.Sheets[workbook.SheetNames[0]];
+    const rows = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+
+    let created = 0;
+    let updated = 0;
+    const errors = [];
+
+    for (const [index, row] of rows.entries()) {
+      try {
+        const societyName = row.societyName || row['Society Name'];
+        const flatNumber = row.flatNumber || row['Flat Number'];
+        const name = row.name || row['Name'];
+        const maintenanceAmount = Number(row.maintenanceAmount || row['Maintenance Amount']);
+        const password = row.password || row['Password'];
+
+        if (!societyName || !flatNumber || !name || !maintenanceAmount) {
+          throw new Error('Missing required fields (societyName, flatNumber, name, maintenanceAmount)');
+        }
+
+        const payload = {
+          societyName,
+          flatNumber,
+          name,
+          email: row.email || row['Email'] || '',
+          phone: row.phone || row['Phone'] || '',
+          tenantName: row.tenantName || row['Tenant Name'] || '',
+          tenantPhone: row.tenantPhone || row['Tenant Phone'] || '',
+          maintenanceAmount,
+          isTenantPresent: Boolean(row.tenantName || row['Tenant Name']),
+        };
+
+        const existing = await Member.findOne({ flatNumber });
+        if (existing) {
+          Object.assign(existing, payload);
+          if (password) {
+            existing.passwordHash = await bcrypt.hash(String(password), SALT_ROUNDS);
+          }
+          await existing.save();
+          updated += 1;
+        } else {
+          const passwordToUse = password ? String(password) : `Pass@${flatNumber}`;
+          const passwordHash = await bcrypt.hash(passwordToUse, SALT_ROUNDS);
+          await Member.create({ ...payload, passwordHash });
+          created += 1;
+        }
+      } catch (rowError) {
+        errors.push({ row: index + 2, message: rowError.message }); // +2 for header and 1-indexing
+      }
+    }
 
     res.json({
-      society_name,
-      total_flats: totalFlats.length,
-      payment_summary: summary,
-      flat_numbers: totalFlats.sort()
+      summary: {
+        created,
+        updated,
+        failed: errors.length,
+      },
+      errors,
     });
   } catch (error) {
-    console.error('Error fetching society summary:', error);
-    res.status(500).json({ error: 'Failed to fetch society summary' });
+    console.error('Import members error:', error);
+    res.status(500).json({ error: 'Failed to import members' });
   }
+});
+
+// Admin payments overview
+app.get('/admin/payments', authMiddleware('admin'), async (req, res) => {
+  try {
+    const { status, flatNumber } = req.query;
+    const filter = {};
+    if (status) filter.status = status;
+
+    const memberFilter = {};
+    if (flatNumber) {
+      memberFilter.flatNumber = flatNumber;
+    }
+
+    const transactions = await Transaction.find(filter)
+      .sort({ createdAt: -1 })
+      .populate({ path: 'member', match: memberFilter });
+
+    const filtered = transactions.filter((txn) => txn.member);
+
+    res.json({
+      payments: filtered.map((txn) => ({
+        orderId: txn.orderId,
+        paymentId: txn.paymentId,
+        amount: txn.amount,
+        status: txn.status,
+        paymentPeriod: txn.paymentPeriod,
+        maintenanceType: txn.maintenanceType,
+        member: sanitizeMember(txn.member),
+        invoiceUrl: txn.invoicePath ? `/invoices/${path.basename(txn.invoicePath)}` : null,
+        createdAt: txn.createdAt,
+        paidAt: txn.paidAt,
+      })),
+    });
+  } catch (error) {
+    console.error('List payments error:', error);
+    res.status(500).json({ error: 'Failed to list payments' });
+  }
+});
+
+// Health check
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', timestamp: Date.now() });
+});
+
+app.use((req, res) => {
+  res.status(404).json({ error: `Route ${req.originalUrl} not found` });
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
 });
