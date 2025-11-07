@@ -12,6 +12,7 @@ import XLSX from 'xlsx';
 import PDFDocument from 'pdfkit';
 import fs from 'fs';
 import path from 'path';
+import nodemailer from 'nodemailer';
 import { fileURLToPath } from 'url';
 
 dotenv.config();
@@ -32,6 +33,7 @@ if (!RAZORPAY_KEY_ID || !RAZORPAY_SECRET) {
 const uploadsDir = path.join(__dirname, 'uploads');
 const profilesDir = path.join(uploadsDir, 'profiles');
 const invoicesDir = path.join(__dirname, 'invoices');
+const reportsDir = path.join(__dirname, 'reports');
 
 const ensureDir = (dirPath) => {
   if (!fs.existsSync(dirPath)) {
@@ -42,6 +44,7 @@ const ensureDir = (dirPath) => {
 ensureDir(uploadsDir);
 ensureDir(profilesDir);
 ensureDir(invoicesDir);
+ensureDir(reportsDir);
 
 // Middleware
 app.use(cors());
@@ -49,6 +52,7 @@ app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: true }));
 app.use('/uploads', express.static(uploadsDir));
 app.use('/invoices', express.static(invoicesDir));
+app.use('/reports', express.static(reportsDir));
 
 // MongoDB setup
 const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/society-portal';
@@ -116,6 +120,31 @@ if (RAZORPAY_KEY_ID && RAZORPAY_SECRET) {
     console.error('Failed to initialize Razorpay client:', error);
   }
 }
+
+let mailTransporter = null;
+
+const getMailTransporter = () => {
+  const host = process.env.SMTP_HOST;
+  if (!host) {
+    return null;
+  }
+
+  if (!mailTransporter) {
+    const port = Number(process.env.SMTP_PORT) || 587;
+    const secure = String(process.env.SMTP_SECURE || '').toLowerCase() === 'true';
+    const user = process.env.SMTP_USER;
+    const pass = process.env.SMTP_PASS;
+
+    mailTransporter = nodemailer.createTransport({
+      host,
+      port,
+      secure,
+      auth: user && pass ? { user, pass } : undefined,
+    });
+  }
+
+  return mailTransporter;
+};
 
 const SALT_ROUNDS = 10;
 
@@ -301,6 +330,47 @@ const generateInvoicePdf = (transaction, member) => {
       reject(error);
     }
   });
+};
+
+const csvEscape = (value) => {
+  if (value === null || value === undefined) {
+    return '';
+  }
+
+  const stringValue = String(value);
+  if (stringValue.includes(',') || stringValue.includes('\n') || stringValue.includes('"')) {
+    return `"${stringValue.replace(/"/g, '""')}"`;
+  }
+
+  return stringValue;
+};
+
+const parseDateParam = (value, { endOfDay = false } = {}) => {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return null;
+  }
+
+  if (endOfDay) {
+    parsed.setHours(23, 59, 59, 999);
+  }
+
+  return parsed;
+};
+
+const toReportDownloadPath = (fileName) => `/reports/${fileName}`;
+
+const buildPublicUrl = (relativePath) => {
+  try {
+    const base = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
+    return new URL(relativePath, base).href;
+  } catch (_error) {
+    return relativePath;
+  }
 };
 
 // Auth Routes
@@ -836,6 +906,156 @@ app.post('/admin/members/import', authMiddleware('admin'), importUpload.single('
   }
 });
 
+// Payment reporting for admin
+app.post('/admin/payments/report', authMiddleware('admin'), async (req, res) => {
+  try {
+    const { startDate, endDate, status, flatNumber, sendEmail = false, email: emailOverride } = req.body || {};
+
+    const filter = {};
+    if (status) {
+      filter.status = status;
+    }
+
+    const start = parseDateParam(startDate);
+    const end = parseDateParam(endDate, { endOfDay: true });
+
+    if (start || end) {
+      filter.createdAt = {};
+      if (start) {
+        filter.createdAt.$gte = start;
+      }
+      if (end) {
+        filter.createdAt.$lte = end;
+      }
+    }
+
+    const memberMatch = {};
+    if (flatNumber) {
+      memberMatch.flatNumber = flatNumber;
+    }
+
+    const transactions = await Transaction.find(filter)
+      .sort({ createdAt: -1 })
+      .populate({ path: 'member', match: memberMatch });
+
+    const payments = transactions.filter((txn) => txn.member);
+
+    const totalPaid = payments
+      .filter((txn) => txn.status === 'paid')
+      .reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+
+    const totalOutstanding = payments
+      .filter((txn) => txn.status !== 'paid')
+      .reduce((sum, txn) => sum + Number(txn.amount || 0), 0);
+
+    const csvLines = [
+      'Society,Flat,Member,Email,Phone,Period,Status,Amount (INR),Paid At,Created At,Updated At',
+    ];
+
+    payments.forEach((txn) => {
+      csvLines.push(
+        [
+          csvEscape(txn.member.societyName || ''),
+          csvEscape(txn.member.flatNumber || ''),
+          csvEscape(txn.member.name || ''),
+          csvEscape(txn.member.email || ''),
+          csvEscape(txn.member.phone || ''),
+          csvEscape(txn.paymentPeriod || ''),
+          csvEscape(txn.status || ''),
+          csvEscape(Number(txn.amount || 0).toFixed(2)),
+          csvEscape(txn.paidAt ? new Date(txn.paidAt).toISOString() : ''),
+          csvEscape(txn.createdAt ? new Date(txn.createdAt).toISOString() : ''),
+          csvEscape(txn.updatedAt ? new Date(txn.updatedAt).toISOString() : ''),
+        ].join(',')
+      );
+    });
+
+    const csvContent = csvLines.join('\n');
+    const fileName = `payment-report-${Date.now()}.csv`;
+    const filePath = path.join(reportsDir, fileName);
+    await fs.promises.writeFile(filePath, csvContent, 'utf8');
+
+    const downloadPath = toReportDownloadPath(fileName);
+    const reportSummary = {
+      fileName,
+      downloadUrl: downloadPath,
+      generatedAt: new Date().toISOString(),
+      totals: {
+        records: payments.length,
+        paid: totalPaid,
+        outstanding: totalOutstanding,
+      },
+      filters: {
+        startDate: start ? start.toISOString() : null,
+        endDate: end ? end.toISOString() : null,
+        status: status || null,
+        flatNumber: flatNumber || null,
+      },
+    };
+
+    const emailStatus = {
+      requested: Boolean(sendEmail),
+      sent: false,
+    };
+
+    if (sendEmail) {
+      const transporter = getMailTransporter();
+      if (!transporter) {
+        emailStatus.error = 'SMTP settings are not configured on the server';
+      } else {
+        const recipient = emailOverride || req.admin?.email;
+        if (!recipient) {
+          emailStatus.error = 'Recipient email is missing';
+        } else {
+          const fromAddress = process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@example.com';
+          const absoluteUrl = buildPublicUrl(downloadPath);
+          const emailLines = [
+            `Hello ${req.admin?.name || 'Admin'},`,
+            '',
+            `Your maintenance payment report has been generated with ${payments.length} record${payments.length === 1 ? '' : 's'}.`,
+            `Total collected: \u20B9${totalPaid.toFixed(2)}`,
+            `Outstanding: \u20B9${totalOutstanding.toFixed(2)}`,
+            '',
+            `Download link: ${absoluteUrl}`,
+            '',
+            'The report CSV file is attached for your convenience.',
+            '',
+            'Regards,',
+            'Society Portal',
+          ];
+
+          try {
+            await transporter.sendMail({
+              to: recipient,
+              from: fromAddress,
+              subject: 'Maintenance payment report',
+              text: emailLines.join('\n'),
+              attachments: [
+                {
+                  filename: fileName,
+                  path: filePath,
+                },
+              ],
+            });
+            emailStatus.sent = true;
+          } catch (mailError) {
+            console.error('Payment report email error:', mailError);
+            emailStatus.error = mailError.message || 'Failed to send email notification';
+          }
+        }
+      }
+    }
+
+    res.json({
+      report: reportSummary,
+      email: emailStatus,
+    });
+  } catch (error) {
+    console.error('Generate payment report error:', error);
+    res.status(500).json({ error: 'Failed to generate payment report' });
+  }
+});
+
 // Admin payments overview
 app.get('/admin/payments', authMiddleware('admin'), async (req, res) => {
   try {
@@ -871,6 +1091,90 @@ app.get('/admin/payments', authMiddleware('admin'), async (req, res) => {
   } catch (error) {
     console.error('List payments error:', error);
     res.status(500).json({ error: 'Failed to list payments' });
+  }
+});
+
+app.post('/admin/payments/:orderId/notify', authMiddleware('admin'), async (req, res) => {
+  try {
+    const transporter = getMailTransporter();
+    if (!transporter) {
+      return res.status(400).json({ error: 'SMTP settings are not configured on the server' });
+    }
+
+    const { orderId } = req.params;
+    const { email: emailOverride } = req.body || {};
+
+    const transaction = await Transaction.findOne({ orderId }).populate('member');
+    if (!transaction) {
+      return res.status(404).json({ error: 'Payment not found' });
+    }
+
+    if (!transaction.member) {
+      return res.status(400).json({ error: 'Payment is not linked to a member record' });
+    }
+
+    if (transaction.status !== 'paid') {
+      return res.status(400).json({ error: 'Email notifications are only available for paid transactions' });
+    }
+
+    const recipient = emailOverride || transaction.member.email;
+    if (!recipient) {
+      return res.status(400).json({ error: 'No recipient email address available for this member' });
+    }
+
+    const fromAddress = process.env.SMTP_FROM || process.env.SMTP_USER || 'no-reply@example.com';
+    const invoicePath = transaction.invoicePath;
+    const publicInvoicePath = invoicePath ? `/invoices/${path.basename(invoicePath)}` : null;
+    const absoluteInvoiceUrl = publicInvoicePath ? buildPublicUrl(publicInvoicePath) : null;
+
+    const amountFormatted = `₹${Number(transaction.amount || 0).toFixed(2)}`;
+    const paymentPeriod = transaction.paymentPeriod || 'the latest billing period';
+
+    const lines = [
+      `Hello ${transaction.member.name || 'Resident'},`,
+      '',
+      `We have successfully recorded your maintenance payment for ${paymentPeriod}.`,
+      `Amount received: ${amountFormatted}.`,
+    ];
+
+    if (transaction.paidAt) {
+      lines.push(`Paid on: ${new Date(transaction.paidAt).toLocaleString()}.`);
+    }
+
+    if (absoluteInvoiceUrl) {
+      lines.push('', `Invoice download link: ${absoluteInvoiceUrl}`);
+    }
+
+    lines.push('', 'Thank you for staying up to date with your maintenance dues.', '', 'Regards,', 'Society Portal');
+
+    const mailOptions = {
+      to: recipient,
+      from: fromAddress,
+      subject: 'Maintenance payment confirmation',
+      text: lines.join('\n'),
+    };
+
+    if (invoicePath && fs.existsSync(invoicePath)) {
+      mailOptions.attachments = [
+        {
+          filename: path.basename(invoicePath),
+          path: invoicePath,
+        },
+      ];
+    }
+
+    await transporter.sendMail(mailOptions);
+
+    res.json({
+      email: {
+        sent: true,
+        recipient,
+      },
+      invoiceUrl: absoluteInvoiceUrl,
+    });
+  } catch (error) {
+    console.error('Send payment notification error:', error);
+    res.status(500).json({ error: 'Failed to send payment notification' });
   }
 });
 

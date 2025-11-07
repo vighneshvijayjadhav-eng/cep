@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { createMember, deleteMember, importMembers, listMembers, listPayments, updateMember } from '../services/adminService.js';
+import { createMember, deleteMember, generatePaymentReport, importMembers, listMembers, listPayments, sendPaymentNotification, updateMember } from '../services/adminService.js';
 import { formatCurrency, formatDateTime } from '../services/paymentService.js';
 import './AdminDashboard.css';
 
@@ -25,6 +25,15 @@ const AdminDashboard = ({ admin, token, onLogout }) => {
   const [statusMessage, setStatusMessage] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
+  const [reportConfig, setReportConfig] = useState({
+    startDate: '',
+    endDate: '',
+    sendEmail: false,
+    email: '',
+  });
+  const [reportResult, setReportResult] = useState(null);
+  const [isGeneratingReport, setIsGeneratingReport] = useState(false);
+  const [emailSending, setEmailSending] = useState({});
 
   const loadMembers = async (term = '') => {
     try {
@@ -56,6 +65,17 @@ const AdminDashboard = ({ admin, token, onLogout }) => {
     bootstrap();
   }, [token]);
 
+  useEffect(() => {
+    if (admin?.email) {
+      setReportConfig((prev) => {
+        if (prev.email) {
+          return prev;
+        }
+        return { ...prev, email: admin.email };
+      });
+    }
+  }, [admin?.email]);
+
   const handleFormChange = (event) => {
     const { name, value } = event.target;
     setForm((prev) => ({ ...prev, [name]: value }));
@@ -64,6 +84,84 @@ const AdminDashboard = ({ admin, token, onLogout }) => {
   const resetForm = () => {
     setForm(emptyForm);
     setEditingId(null);
+  };
+
+  const handleReportConfigChange = (event) => {
+    const { name, value, type, checked } = event.target;
+    setReportConfig((prev) => ({
+      ...prev,
+      [name]: type === 'checkbox' ? checked : value,
+    }));
+  };
+
+  const handleGenerateReport = async (event) => {
+    event.preventDefault();
+    if (isGeneratingReport) {
+      return;
+    }
+
+    const payload = {};
+    if (reportConfig.startDate) {
+      payload.startDate = reportConfig.startDate;
+    }
+    if (reportConfig.endDate) {
+      payload.endDate = reportConfig.endDate;
+    }
+    if (reportConfig.sendEmail) {
+      payload.sendEmail = true;
+      if (!reportConfig.email.trim()) {
+        setStatusMessage('Enter an email address to send the report');
+        return;
+      }
+      payload.email = reportConfig.email.trim();
+    }
+
+    if (payload.startDate && payload.endDate) {
+      const start = new Date(payload.startDate);
+      const end = new Date(payload.endDate);
+      if (start > end) {
+        setStatusMessage('Start date must be before end date');
+        return;
+      }
+    }
+
+    setIsGeneratingReport(true);
+    setStatusMessage('');
+    setReportResult(null);
+
+    try {
+      const response = await generatePaymentReport(token, payload);
+      setReportResult(response);
+      setStatusMessage('Payment report generated');
+    } catch (error) {
+      setStatusMessage(error.message || 'Failed to generate payment report');
+    } finally {
+      setIsGeneratingReport(false);
+    }
+  };
+
+  const handleSendPaymentEmail = async (payment) => {
+    const orderId = payment.orderId;
+    if (!orderId || emailSending[orderId]) {
+      return;
+    }
+
+    setEmailSending((prev) => ({ ...prev, [orderId]: true }));
+    setStatusMessage('');
+
+    try {
+      const payload = {};
+      if (payment.member?.email) {
+        payload.email = payment.member.email;
+      }
+      const response = await sendPaymentNotification(token, orderId, payload);
+      const recipient = response?.email?.recipient || payment.member?.email;
+      setStatusMessage(`Payment confirmation email sent${recipient ? ` to ${recipient}` : ''}`);
+    } catch (error) {
+      setStatusMessage(error.message || 'Failed to send payment email');
+    } finally {
+      setEmailSending((prev) => ({ ...prev, [orderId]: false }));
+    }
   };
 
   const handleSubmit = async (event) => {
@@ -317,6 +415,69 @@ const AdminDashboard = ({ admin, token, onLogout }) => {
       </section>
 
       <section className="admin-card">
+        <h3>Payment reports</h3>
+        <form className="report-form" onSubmit={handleGenerateReport}>
+          <div className="field-pair">
+            <label>
+              <span>Start date</span>
+              <input type="date" name="startDate" value={reportConfig.startDate} onChange={handleReportConfigChange} />
+            </label>
+            <label>
+              <span>End date</span>
+              <input type="date" name="endDate" value={reportConfig.endDate} onChange={handleReportConfigChange} />
+            </label>
+          </div>
+
+          <label className="checkbox-field">
+            <input type="checkbox" name="sendEmail" checked={reportConfig.sendEmail} onChange={handleReportConfigChange} />
+            <span>Send report via email</span>
+          </label>
+
+          {reportConfig.sendEmail && (
+            <label>
+              <span>Email recipient</span>
+              <input type="email" name="email" value={reportConfig.email} onChange={handleReportConfigChange} placeholder="admin@example.com" />
+            </label>
+          )}
+
+          <div className="form-actions">
+            <button type="submit" disabled={isGeneratingReport}>{isGeneratingReport ? 'Generating...' : 'Generate report'}</button>
+          </div>
+        </form>
+
+        {reportResult?.report && (
+          <div className="report-summary">
+            <div>
+              <strong>Records</strong>
+              <span>{reportResult.report.totals?.records || 0}</span>
+            </div>
+            <div>
+              <strong>Collected</strong>
+              <span>{formatCurrency(reportResult.report.totals?.paid || 0)}</span>
+            </div>
+            <div>
+              <strong>Outstanding</strong>
+              <span>{formatCurrency(reportResult.report.totals?.outstanding || 0)}</span>
+            </div>
+            <div>
+              <strong>Download</strong>
+              {reportResult.report.downloadUrl ? (
+                <a href={reportResult.report.downloadUrl} target="_blank" rel="noopener noreferrer">CSV report</a>
+              ) : (
+                <span className="muted">Not available</span>
+              )}
+            </div>
+          </div>
+        )}
+
+        {reportResult?.email?.requested && (
+          <p className={`report-status ${reportResult.email.sent ? 'success' : 'error'}`}>
+            {reportResult.email.sent ? 'Email sent successfully' : reportResult.email.error || 'Email notification not sent'}
+          </p>
+        )}
+      </section>
+
+      <section className="admin-card">
         <header className="card-header">
           <div>
             <h3>Recent payments</h3>
@@ -341,6 +502,7 @@ const AdminDashboard = ({ admin, token, onLogout }) => {
                   <th>Amount</th>
                   <th>Paid at</th>
                   <th>Invoice</th>
+                  <th>Email receipt</th>
                 </tr>
               </thead>
               <tbody>
@@ -361,6 +523,22 @@ const AdminDashboard = ({ admin, token, onLogout }) => {
                         <a href={payment.invoiceUrl} target="_blank" rel="noopener noreferrer">Download</a>
                       ) : (
                         <span className="muted">—</span>
+                      )}
+                    </td>
+                    <td>
+                      {payment.status !== 'paid' ? (
+                        <span className="muted">Only for paid</span>
+                      ) : !payment.member?.email ? (
+                        <span className="muted">No email on file</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="notify-button"
+                          onClick={() => handleSendPaymentEmail(payment)}
+                          disabled={Boolean(emailSending[payment.orderId])}
+                        >
+                          {emailSending[payment.orderId] ? 'Sending...' : 'Send receipt'}
+                        </button>
                       )}
                     </td>
                   </tr>

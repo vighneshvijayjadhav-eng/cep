@@ -61,3 +61,19 @@ export const listPayments = async (token, params = {}) => {
     invoiceUrl: payment.invoiceUrl ? buildInvoiceUrl(payment.invoiceUrl) : '',
   }));
 };
+
+export const generatePaymentReport = async (token, payload = {}) => {
+  return apiRequest('/admin/payments/report', {
+    method: 'POST',
+    token,
+    body: payload,
+  });
+};
+
+export const sendPaymentNotification = async (token, orderId, payload = {}) => {
+  return apiRequest(`/admin/payments/${orderId}/notify`, {
+    method: 'POST',
+    token,
+    body: payload,
+  });
+};

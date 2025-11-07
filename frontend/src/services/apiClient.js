@@ -39,6 +39,10 @@ const parseResponse = async (response) => {
         invoiceUrl: payment.invoiceUrl ? toAbsoluteUrl(payment.invoiceUrl) : '',
       }));
     }
+
+    if (payload.report && payload.report.downloadUrl) {
+      payload.report.downloadUrl = toAbsoluteUrl(payload.report.downloadUrl);
+    }
   }
 
   return payload;
