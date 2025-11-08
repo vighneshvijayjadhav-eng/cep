@@ -106,6 +106,28 @@
   color: #1f2937;
 }
 
+.pending-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: 10px;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  font-size: 0.9rem;
+  color: #0f172a;
+}
+
+.pending-due,
+.pending-total {
+  font-weight: 600;
+}
+
+.pending-overdue {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
 .payment-form input,
 .payment-form select,
 .payment-form textarea {

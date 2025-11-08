@@ -77,3 +77,11 @@ export const sendPaymentNotification = async (token, orderId, payload = {}) => {
     body: payload,
   });
 };
+
+export const sendPaymentReminder = async (token, orderId, payload = {}) => {
+  return apiRequest(`/admin/payments/${orderId}/remind`, {
+    method: 'POST',
+    token,
+    body: payload,
+  });
+};
