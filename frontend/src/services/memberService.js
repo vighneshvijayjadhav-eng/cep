@@ -33,3 +33,19 @@ export const fetchMemberPayments = async (token) => {
     invoiceUrl: payment.invoiceUrl ? buildInvoiceUrl(payment.invoiceUrl) : '',
   }));
 };
+
+export const fetchPendingPeriods = async (token, params = {}) => {
+  const query = new URLSearchParams();
+  if (params.limit) {
+    query.set('limit', params.limit);
+  }
+
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  const data = await apiRequest(`/member/payments/pending-periods${suffix}`, { token });
+
+  if (!data || !Array.isArray(data.periods)) {
+    return [];
+  }
+
+  return data.periods;
+};

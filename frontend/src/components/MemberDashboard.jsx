@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import config from '../config/config.js';
-import { fetchMemberProfile, fetchMemberPayments } from '../services/memberService.js';
+import { fetchMemberProfile, fetchMemberPayments, fetchPendingPeriods } from '../services/memberService.js';
 import { createMemberOrder, ensureRazorpay, formatCurrency, formatDateTime, verifyMemberPayment } from '../services/paymentService.js';
 import './MemberDashboard.css';
 
@@ -9,6 +9,7 @@ const emptyForm = {
   maintenanceType: 'monthly',
   amount: '',
   notes: '',
+  dueDate: '',
 };
 
 const MemberDashboard = ({ member: initialMember, token, onLogout }) => {
@@ -20,19 +21,57 @@ const MemberDashboard = ({ member: initialMember, token, onLogout }) => {
   const [message, setMessage] = useState('');
   const [invoiceUrl, setInvoiceUrl] = useState('');
   const [manualMode, setManualMode] = useState(false);
+  const [pendingPeriods, setPendingPeriods] = useState([]);
+  const [selectedPeriodId, setSelectedPeriodId] = useState('');
+
+  const formatDateOnly = (value) => {
+    if (!value) {
+      return '—';
+    }
+
+    try {
+      return new Intl.DateTimeFormat('en-IN', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      }).format(new Date(value));
+    } catch (_error) {
+      return '—';
+    }
+  };
+
+  const formatNumberInputValue = (value) => {
+    if (!Number.isFinite(value)) {
+      return '';
+    }
+
+    const fixed = value.toFixed(2);
+    return fixed.endsWith('.00') ? fixed.slice(0, -3) : fixed;
+  };
 
   const loadProfile = async () => {
     try {
       const data = await fetchMemberProfile(token);
       if (data) {
         setProfile(data);
-        setForm((prev) => ({
-          ...prev,
-          amount: data.maintenanceAmount || prev.amount,
-        }));
+        setForm((prev) => {
+          if (prev.amount) {
+            return prev;
+          }
+          const baseAmount = Number(data.maintenanceAmount);
+          if (!Number.isFinite(baseAmount) || baseAmount <= 0) {
+            return prev;
+          }
+          return {
+            ...prev,
+            amount: formatNumberInputValue(baseAmount),
+          };
+        });
       }
+      return data;
     } catch (error) {
       setMessage(error.message || 'Failed to load profile');
+      return null;
     }
   };
 
@@ -40,15 +79,84 @@ const MemberDashboard = ({ member: initialMember, token, onLogout }) => {
     try {
       const data = await fetchMemberPayments(token);
       setPayments(data);
+      return data;
     } catch (error) {
       setMessage(error.message || 'Failed to load payments');
+      return [];
+    }
+  };
+
+  const applyPeriodSelection = (period, { markSelected = true } = {}) => {
+    if (!period) {
+      return;
+    }
+
+    const totalRaw = Number(period.totalAmount ?? period.baseAmount);
+    const totalValue = formatNumberInputValue(totalRaw);
+
+    setForm((prev) => ({
+      ...prev,
+      paymentPeriod: period.label,
+      dueDate: period.dueDate || '',
+      amount: totalValue || prev.amount,
+    }));
+
+    if (markSelected) {
+      setSelectedPeriodId(period.id);
+    }
+  };
+
+  const loadPendingPeriods = async ({ autoSelect = false } = {}) => {
+    try {
+      const periods = await fetchPendingPeriods(token);
+      setPendingPeriods(periods);
+
+      if (periods.length === 0) {
+        if (autoSelect) {
+          setSelectedPeriodId('');
+          setForm((prev) => ({
+            ...prev,
+            paymentPeriod: '',
+            dueDate: '',
+          }));
+        }
+        return periods;
+      }
+
+      if (autoSelect) {
+        applyPeriodSelection(periods[0], { markSelected: true });
+        return periods;
+      }
+
+      if (selectedPeriodId) {
+        const current = periods.find((item) => item.id === selectedPeriodId);
+        if (current) {
+          applyPeriodSelection(current, { markSelected: false });
+          return periods;
+        }
+      }
+
+      applyPeriodSelection(periods[0], { markSelected: true });
+      return periods;
+    } catch (error) {
+      setMessage(error.message || 'Failed to load pending periods');
+      setPendingPeriods([]);
+      if (autoSelect) {
+        setSelectedPeriodId('');
+        setForm((prev) => ({
+          ...prev,
+          paymentPeriod: '',
+          dueDate: '',
+        }));
+      }
+      return [];
     }
   };
 
   useEffect(() => {
     const bootstrap = async () => {
       setIsLoading(true);
-      await Promise.all([loadProfile(), loadPayments()]);
+      await Promise.all([loadProfile(), loadPayments(), loadPendingPeriods({ autoSelect: true })]);
       setIsLoading(false);
     };
 
@@ -60,11 +168,40 @@ const MemberDashboard = ({ member: initialMember, token, onLogout }) => {
     setForm((prev) => ({ ...prev, [name]: value }));
   };
 
+  const handlePendingPeriodChange = (event) => {
+    const { value } = event.target;
+    if (!value) {
+      setSelectedPeriodId('');
+      setForm((prev) => ({
+        ...prev,
+        paymentPeriod: '',
+        dueDate: '',
+      }));
+      return;
+    }
+
+    const period = pendingPeriods.find((item) => item.id === value);
+    if (period) {
+      applyPeriodSelection(period, { markSelected: true });
+    }
+  };
+
   const handlePayment = async (event) => {
     event.preventDefault();
     if (isPaying) return;
 
-    if (!form.paymentPeriod.trim()) {
+    const hasOptions = pendingPeriods.length > 0;
+
+    if (hasOptions) {
+      if (!selectedPeriodId) {
+        setMessage('Select a pending month to continue');
+        return;
+      }
+      if (!form.paymentPeriod.trim()) {
+        setMessage('Unable to identify payment period for the selected month');
+        return;
+      }
+    } else if (!form.paymentPeriod.trim()) {
       setMessage('Payment period is required');
       return;
     }
@@ -77,22 +214,31 @@ const MemberDashboard = ({ member: initialMember, token, onLogout }) => {
 
     setIsPaying(true);
     setMessage('');
-  setInvoiceUrl('');
-  setManualMode(false);
+    setInvoiceUrl('');
+    setManualMode(false);
 
     try {
-      const order = await createMemberOrder(token, {
+      const orderPayload = {
         paymentPeriod: form.paymentPeriod.trim(),
         maintenanceType: form.maintenanceType,
         amount: amountNumber,
         notes: form.notes.trim(),
-      });
+      };
+
+      if (form.dueDate) {
+        orderPayload.dueDate = form.dueDate;
+      }
+
+      const order = await createMemberOrder(token, orderPayload);
 
       if (order.manual) {
         setManualMode(true);
         setInvoiceUrl(order.transaction.invoiceUrl || '');
         setMessage('Payment marked as paid. Download your invoice below.');
         await loadPayments();
+        await loadProfile();
+        await loadPendingPeriods({ autoSelect: true });
+        setForm((prev) => ({ ...prev, notes: '' }));
         return;
       }
 
@@ -138,6 +284,9 @@ const MemberDashboard = ({ member: initialMember, token, onLogout }) => {
         setMessage('Payment successful. Download your invoice below.');
         setInvoiceUrl(verification.invoiceUrl || '');
         await loadPayments();
+        await loadProfile();
+        await loadPendingPeriods({ autoSelect: true });
+        setForm((prev) => ({ ...prev, notes: '' }));
       } else {
         setMessage('Payment verification failed. Please contact support.');
       }
@@ -155,6 +304,13 @@ const MemberDashboard = ({ member: initialMember, token, onLogout }) => {
   const latestPaid = useMemo(() => {
     return payments.find((payment) => payment.status === 'paid');
   }, [payments]);
+
+  const selectedPending = useMemo(() => {
+    if (!selectedPeriodId) {
+      return null;
+    }
+    return pendingPeriods.find((period) => period.id === selectedPeriodId) || null;
+  }, [pendingPeriods, selectedPeriodId]);
 
   return (
     <div className="member-dashboard">
@@ -187,6 +343,16 @@ const MemberDashboard = ({ member: initialMember, token, onLogout }) => {
               <span className="label">Last payment</span>
               <strong>{latestPaid ? formatDateTime(latestPaid.paidAt || latestPaid.createdAt) : '—'}</strong>
             </div>
+            <div>
+              <span className="label">Next due</span>
+              <strong>
+                {pendingPeriods.length > 0
+                  ? pendingPeriods[0].dueDateDisplay
+                  : profile?.nextDueDate
+                    ? formatDateOnly(profile.nextDueDate)
+                    : '—'}
+              </strong>
+            </div>
           </div>
         </article>
 
@@ -194,9 +360,36 @@ const MemberDashboard = ({ member: initialMember, token, onLogout }) => {
           <h3>Make a payment</h3>
           <form className="payment-form" onSubmit={handlePayment}>
             <label>
-              <span>Payment period</span>
-              <input name="paymentPeriod" value={form.paymentPeriod} onChange={handleFormChange} placeholder="e.g. November 2025" required />
+              <span>{pendingPeriods.length > 0 ? 'Pending months' : 'Payment period'}</span>
+              {pendingPeriods.length > 0 ? (
+                <select name="pendingPeriod" value={selectedPeriodId} onChange={handlePendingPeriodChange} required>
+                  <option value="">Select a pending month</option>
+                  {pendingPeriods.map((period) => (
+                    <option key={period.id} value={period.id}>
+                      {period.label} · {formatCurrency(period.totalAmount)}
+                      {period.isOverdue ? ' (Overdue)' : ''}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  name="paymentPeriod"
+                  value={form.paymentPeriod}
+                  onChange={handleFormChange}
+                  placeholder="e.g. November 2025"
+                  required
+                />
+              )}
             </label>
+            {pendingPeriods.length > 0 && selectedPending && (
+              <div className="pending-summary">
+                <span className="pending-due">Due on {selectedPending.dueDateDisplay}</span>
+                <span>Base: {formatCurrency(selectedPending.baseAmount)}</span>
+                <span>Penalty: {formatCurrency(selectedPending.penaltyAmount)}</span>
+                <span className="pending-total">Total: {formatCurrency(selectedPending.totalAmount)}</span>
+                {selectedPending.isOverdue && <span className="pending-overdue">Overdue month</span>}
+              </div>
+            )}
             <label>
               <span>Amount (₹)</span>
               <input name="amount" type="number" min="1" value={form.amount} onChange={handleFormChange} required />
@@ -213,7 +406,9 @@ const MemberDashboard = ({ member: initialMember, token, onLogout }) => {
               <span>Notes</span>
               <textarea name="notes" value={form.notes} onChange={handleFormChange} placeholder="Optional message for the office" rows={2} />
             </label>
-            <button type="submit" disabled={isPaying}>{isPaying ? 'Processing…' : 'Pay now'}</button>
+            <button type="submit" disabled={isPaying || (pendingPeriods.length > 0 && !selectedPeriodId)}>
+              {isPaying ? 'Processing…' : 'Pay now'}
+            </button>
           </form>
           {invoiceUrl && (
             <a className="invoice-link" href={invoiceUrl} target="_blank" rel="noopener noreferrer">Download invoice</a>
